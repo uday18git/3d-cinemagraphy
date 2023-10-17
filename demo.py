@@ -15,7 +15,8 @@ from lib.utils.render_utils import *
 from lib.model.motion.motion_model import SPADEUnetMaskMotion
 from lib.model.motion.sync_batchnorm import convert_model
 from lib.renderer import ImgRenderer
-from lib.model.inpaint.inpainter import Inpaintefrom lib.utils.data_utils import resize_img
+from lib.model.inpaint.inpainter import Inpainter
+from lib.utils.data_utils import resize_img
 from third_party.DPT.run_monodepth import run_dpt
 
 
