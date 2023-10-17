@@ -141,14 +141,14 @@ def get_input_data(args, config, video_out_folder, ds_factor=1):
     }
 
 
-def render(args):
+def render_single_video(args):
     device = "cuda:{}".format(args.local_rank)
 
-    # set up folder
+    # Set up the output folder
     video_out_folder = os.path.join(args.input_dir, 'output')
     os.makedirs(video_out_folder, exist_ok=True)
 
-    # load config
+    # Load the configuration
     check_file(args.config)
     config = load_config(args.config)
 
@@ -156,11 +156,11 @@ def render(args):
     torch.cuda.empty_cache()
 
     ###########################################################################
-    """ model """
+    """ Model """
 
     model = SpaceTimeAnimationModel(args, config)
     if model.start_step == 0:
-        raise Exception('no pretrained model found! please check the model path.')
+        raise Exception('No pretrained model found! Please check the model path.')
 
     scene_flow_estimator = SPADEUnetMaskMotion(config['generator']).to(device)
     scene_flow_estimator = convert_model(scene_flow_estimator)
@@ -171,7 +171,7 @@ def render(args):
     renderer = ImgRenderer(args, config, model, scene_flow_estimator, inpainter, device)
 
     ###########################################################################
-    """ render """
+    """ Render a Single Video with a Fixed Camera Trajectory """
 
     model.switch_to_eval()
     with torch.no_grad():
@@ -181,72 +181,59 @@ def render(args):
             renderer.compute_flow_and_inpaint()
         flow = flow / args.flow_scale
 
-        num_frames = [60, 60, 60, 90]
-        video_paths = ['up-down', 'zoom-in', 'side', 'circle']
-        Ts = [
-            define_camera_path(num_frames[0], 0., -0.08, 0., path_type='double-straight-line', return_t_only=True),
-            define_camera_path(num_frames[1], 0., 0., -0.24, path_type='straight-line', return_t_only=True),
-            define_camera_path(num_frames[2], -0.09, 0, -0, path_type='double-straight-line', return_t_only=True),
-            define_camera_path(num_frames[3], -0.04, -0.04, -0.09, path_type='circle', return_t_only=True),
-        ]
+        num_frames = 180  # Total number of frames in the video
+        video_path = 'single_video'  # Name of the video
+
+        # Define a fixed camera trajectory (modify as needed)
+        T = define_camera_path(num_frames, 0.0, -0.08, 0.0, path_type='double-straight-line', return_t_only=True)
+        T = torch.from_numpy(T).float().to(renderer.device)
+
         crop = 32
         kernel = torch.ones(5, 5, device=device)
+        frames = []
 
-        for j, T in enumerate(Ts):
-            T = torch.from_numpy(T).float().to(renderer.device)
-            time_steps = range(0, num_frames[j])
-            start_index = torch.tensor([0]).to(device)
-            end_index = torch.tensor([num_frames[j] - 1]).to(device)
-            frames = []
-            for middle_index, t_step in tqdm(enumerate(time_steps), total=len(time_steps), ncols=150,
-                                             desc='generating video of {} camera trajectory'.format(video_paths[j])):
-                middle_index = torch.tensor([middle_index]).to(device)
-                time = ((middle_index.float() - start_index.float()).float() / (
-                        end_index.float() - start_index.float() + 1.0).float()).item()
+        for t_step in range(num_frames):
+            time = float(t_step) / num_frames
 
-                flow_f = renderer.euler_integration(flow, middle_index.long() - start_index.long())
-                flow_b = renderer.euler_integration(-flow, end_index.long() + 1 - middle_index.long())
-                flow_f = flow_f.permute(0, 2, 3, 1)
-                flow_b = flow_b.permute(0, 2, 3, 1)
+            flow_f = renderer.euler_integration(flow, t_step)
+            flow_b = renderer.euler_integration(-flow, num_frames - t_step)
+            flow_f = flow_f.permute(0, 2, 3, 1)
+            flow_b = flow_b.permute(0, 2, 3, 1)
 
-                _, all_pts_f, _, all_rgbas_f, _, all_feats_f, \
-                    all_masks_f, all_optical_flow_f = \
-                    renderer.compute_scene_flow_for_motion(coord, torch.inverse(renderer.pose), renderer.src_img,
-                                                           rgba_layers_src, featmaps_src, pts_src, depth_layers_src,
-                                                           mask_layers_src, flow_f, kernel, with_inpainted=True)
-                _, all_pts_b, _, all_rgbas_b, _, all_feats_b, \
-                    all_masks_b, all_optical_flow_b = \
-                    renderer.compute_scene_flow_for_motion(coord, torch.inverse(renderer.pose), renderer.src_img,
-                                                           rgba_layers_src, featmaps_src, pts_src, depth_layers_src,
-                                                           mask_layers_src, flow_b, kernel, with_inpainted=True)
+            _, all_pts_f, _, all_rgbas_f, _, all_feats_f, all_masks_f, all_optical_flow_f = \
+                renderer.compute_scene_flow_for_motion(coord, torch.inverse(renderer.pose), renderer.src_img,
+                                                       rgba_layers_src, featmaps_src, pts_src, depth_layers_src,
+                                                       mask_layers_src, flow_f, kernel, with_inpainted=True)
 
-                all_pts_flowed = torch.cat(all_pts_f + all_pts_b)
-                all_rgbas_flowed = torch.cat(all_rgbas_f + all_rgbas_b)
-                all_feats_flowed = torch.cat(all_feats_f + all_feats_b)
-                all_masks = torch.cat(all_masks_f + all_masks_b)
-                all_side_ids = torch.zeros_like(all_masks.squeeze(), dtype=torch.long)
-                num_pts_2 = sum([len(x) for x in all_pts_b])
-                all_side_ids[-num_pts_2:] = 1
+            _, all_pts_b, _, all_rgbas_b, _, all_feats_b, all_masks_b, all_optical_flow_b = \
+                renderer.compute_scene_flow_for_motion(coord, torch.inverse(renderer.pose), renderer.src_img,
+                                                       rgba_layers_src, featmaps_src, pts_src, depth_layers_src,
+                                                       mask_layers_src, flow_b, kernel, with_inpainted=True)
 
-                pred_img, _, meta = renderer.render_pcd(all_pts_flowed,
-                                                        all_rgbas_flowed,
-                                                        all_feats_flowed,
-                                                        all_masks, all_side_ids,
-                                                        t=T[middle_index.item()],
-                                                        time=time,
-                                                        t_step=t_step,
-                                                        path_type=video_paths[j])
+            all_pts_flowed = torch.cat(all_pts_f + all_pts_b)
+            all_rgbas_flowed = torch.cat(all_rgbas_f + all_rgbas_b)
+            all_feats_flowed = torch.cat(all_feats_f + all_feats_b)
+            all_masks = torch.cat(all_masks_f + all_masks_b)
+            all_side_ids = torch.zeros_like(all_masks.squeeze(), dtype=torch.long)
+            num_pts_2 = sum([len(x) for x in all_pts_b])
+            all_side_ids[-num_pts_2:] = 1
 
-                frame = (255. * pred_img.detach().cpu().squeeze().permute(1, 2, 0).numpy()).astype(np.uint8)
-                frame = frame[crop:-crop, crop:-crop]
-                frames.append(frame)
+            pred_img, _, meta = renderer.render_pcd(all_pts_flowed, all_rgbas_flowed, all_feats_flowed,
+                                                    all_masks, all_side_ids, t=T[t_step], time=time, t_step=t_step,
+                                                    path_type=video_path)
 
-            video_out_file = os.path.join(video_out_folder,
-                                          f'{video_paths[j]}_flow_scale={args.flow_scale}.mp4')
+            frame = (255.0 * pred_img.detach().cpu().squeeze().permute(1, 2, 0).numpy()).astype(np.uint8)
+            frame = frame[crop:-crop, crop:-crop]
+            frames.append(frame)
 
-            imageio.mimwrite(video_out_file, frames, fps=25, quality=8)
+        video_out_file = os.path.join(video_out_folder, f'{video_path}_flow_scale={args.flow_scale}.mp4')
 
-        print(f'space-time videos have been saved in {video_out_folder}.')
+        imageio.mimwrite(video_out_file, frames, fps=25, quality=8)
+
+        print(f'Single video has been saved in {video_out_folder}.')
+
+
+
 
 
 if __name__ == '__main__':
@@ -279,4 +266,4 @@ if __name__ == '__main__':
                         help='do not load scheduler when reloading')
     args = parser.parse_args()
 
-    render(args)
+    render_single_video(args)
