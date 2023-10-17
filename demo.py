@@ -27,7 +27,7 @@ def generate_mask_hints_from_user(args, config):
     mask = imageio.imread(mask_file)
     height, width = mask.shape[0], mask.shape[1]
 
-    # hints
+    # stores hint positions and motion vectors
     hint_y = []
     hint_x = []
     hint_motion = []
@@ -36,20 +36,25 @@ def generate_mask_hints_from_user(args, config):
     for shape in data['shapes']:
         if shape['label'].startswith('hint'):
             start, end = np.array(shape["points"])
-            hint_x.append(int(start[0]))
+            hint_x.append(int(start[0])) 
             hint_y.append(int(start[1]))
-            hint_motion.append((end - start) / 50.)
+            hint_motion.append((end - start) / 50.) #scales it
 
     hint_y = torch.tensor(hint_y)
     hint_x = torch.tensor(hint_x)
     hint_motion = torch.tensor(np.array(hint_motion)).permute(1, 0)[None]
-    max_hint = hint_motion.shape[-1]
-    xs = torch.linspace(0, width - 1, width)
+    max_hint = hint_motion.shape[-1]  # Maximum number of hints
+    xs = torch.linspace(0, width - 1, width) #creates a grid of x cordinates (equally spaced)
     ys = torch.linspace(0, height - 1, height)
+
+
+    # expands the x and y coordinates to match the dimensions of the mask by repeating them.
     xs = xs.view(1, 1, width).repeat(1, height, 1)
     ys = ys.view(1, height, 1).repeat(1, 1, width)
-    xys = torch.cat((xs, ys), 1).view(2, -1)
 
+    # combines the x and y coordinates to create a tensor (xys) of shape (2, N), where N is the number of pixels in the image.
+    xys = torch.cat((xs, ys), 1).view(2, -1)
+    
     dense_motion = torch.zeros(1, 2, height * width)
     dense_motion_norm = torch.zeros(dense_motion.shape).view(1, 2, -1)
 
@@ -84,14 +89,17 @@ def get_input_data(args, config, video_out_folder, ds_factor=1):
             Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
         ]
     )
+    #It resizes the input image to the specified dimensions, converts it to a PyTorch tensor, and normalizes its values.
     to_tensor = ToTensor()
-
+    # inputting the image
     try:
         img_file = os.path.join(args.input_dir, 'image.png')
         motion_rgb = Image.open(img_file)
     except:
         img_file = os.path.join(args.input_dir, 'image.jpg')
         motion_rgb = Image.open(img_file)
+
+    #uses the function above
     motion_rgb = motion_input_transform(motion_rgb)
     mask, hints = generate_mask_hints_from_user(args, config)
 
@@ -101,11 +109,12 @@ def get_input_data(args, config, video_out_folder, ds_factor=1):
     src_img = resize_img(src_img, ds_factor)
 
     h, w = src_img.shape[:2]
-
+    #depth model
     dpt_model_path = 'ckpts/dpt_hybrid-midas-501f0c75.pt'
+    #running the depth model
     run_dpt(input_path=args.input_dir, output_path=dpt_out_dir, model_path=dpt_model_path, optimize=False)
     disp_file = os.path.join(dpt_out_dir, 'image.png')
-
+    
     src_disp = imageio.imread(disp_file) / 65535.
     src_disp = remove_noise_in_dpt_disparity(src_disp)
 
